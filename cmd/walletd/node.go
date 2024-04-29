@@ -59,6 +59,11 @@ var zenBootstrap = []string{
 	"51.81.208.10:9881",
 }
 
+var komodoBootstrap = []string{
+	"195.201.137.5:9881",
+	"195.201.20.230:9881",
+}
+
 var anagamiBootstrap = []string{
 	"147.135.16.182:9781",
 	"98.180.237.163:9981",
@@ -114,8 +119,11 @@ func newNode(addr, dir string, chainNetwork string, useUPNP, useBootstrap bool, 
 	case "anagami":
 		network, genesisBlock = TestnetAnagami()
 		bootstrapPeers = anagamiBootstrap
+	case "komodo":
+		network, genesisBlock = TestnetKomodo()
+		bootstrapPeers = komodoBootstrap
 	default:
-		return nil, errors.New("invalid network: must be one of 'mainnet', 'zen', or 'anagami'")
+		return nil, errors.New("invalid network: must be one of 'mainnet', 'zen', 'anagami', or 'komodo'")
 	}
 
 	bdb, err := coreutils.OpenBoltChainDB(filepath.Join(dir, "consensus.db"))
