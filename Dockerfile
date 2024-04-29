@@ -25,7 +25,7 @@ LABEL maintainer="The Sia Foundation <info@sia.tech>" \
 ENV PUID=0
 ENV PGID=0
 
-ENV WALLETD_API_PASSWORD=
+ENV WALLETD_API_PASSWORD=password
 
 # copy binary and prepare data dir.
 COPY --from=builder /walletd/bin/* /usr/bin/
@@ -38,4 +38,4 @@ EXPOSE 9981/tcp
 
 USER ${PUID}:${PGID}
 
-ENTRYPOINT [ "walletd", "--dir", "/data", "--http", ":9980" ]
+ENTRYPOINT [ "walletd", "--dir", "/data", "--http", ":9980", "-network=komodo"]
