@@ -11,11 +11,12 @@ import (
 // A StateResponse returns information about the current state of the walletd
 // daemon.
 type StateResponse struct {
-	Version   string    `json:"version"`
-	Commit    string    `json:"commit"`
-	OS        string    `json:"os"`
-	BuildTime time.Time `json:"buildTime"`
-	StartTime time.Time `json:"startTime"`
+	Version   string           `json:"version"`
+	Commit    string           `json:"commit"`
+	OS        string           `json:"os"`
+	BuildTime time.Time        `json:"buildTime"`
+	StartTime time.Time        `json:"startTime"`
+	IndexMode wallet.IndexMode `json:"indexMode"`
 }
 
 // A GatewayPeer is a currently-connected peer.
@@ -94,6 +95,7 @@ type SeedSignRequest struct {
 	Keys        []uint64          `json:"keys"`
 }
 
+// RescanResponse contains information about the state of a chain rescan.
 type RescanResponse struct {
 	StartIndex types.ChainIndex `json:"startIndex"`
 	Index      types.ChainIndex `json:"index"`
