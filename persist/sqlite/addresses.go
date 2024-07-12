@@ -28,7 +28,7 @@ func (s *Store) AddressBalance(address types.Address) (balance wallet.Balance, e
 func (s *Store) AddressEvents(address types.Address, offset, limit int) (events []wallet.Event, err error) {
 	err = s.transaction(func(tx *txn) error {
 		const query = `SELECT ev.id, ev.event_id, ev.maturity_height, ev.date_created, ci.height, ci.block_id, ev.event_type, ev.event_data
-	FROM events ev
+	FROM events ev INDEXED BY events_maturity_height_id_idx -- force the index to prevent temp-btree sorts
 	INNER JOIN event_addresses ea ON (ev.id = ea.event_id)
 	INNER JOIN sia_addresses sa ON (ea.address_id = sa.id)
 	INNER JOIN chain_indices ci ON (ev.chain_index_id = ci.id)
@@ -56,15 +56,15 @@ func (s *Store) AddressEvents(address types.Address, offset, limit int) (events 
 }
 
 // AddressSiacoinOutputs returns the unspent siacoin outputs for an address.
-func (s *Store) AddressSiacoinOutputs(address types.Address, offset, limit int) (siacoins []types.SiacoinElement, err error) {
+func (s *Store) AddressSiacoinOutputs(address types.Address, index types.ChainIndex, offset, limit int) (siacoins []types.SiacoinElement, err error) {
 	err = s.transaction(func(tx *txn) error {
 		const query = `SELECT se.id, se.siacoin_value, se.merkle_proof, se.leaf_index, se.maturity_height, sa.sia_address 
 		FROM siacoin_elements se
 		INNER JOIN sia_addresses sa ON (se.address_id = sa.id)
-		WHERE sa.sia_address=$1 AND se.spent_index_id IS NULL
-		LIMIT $2 OFFSET $3`
+		WHERE sa.sia_address=$1 AND se.maturity_height <= $2 AND se.spent_index_id IS NULL
+		LIMIT $3 OFFSET $4`
 
-		rows, err := tx.Query(query, encode(address), limit, offset)
+		rows, err := tx.Query(query, encode(address), index.Height, limit, offset)
 		if err != nil {
 			return err
 		}
@@ -229,7 +229,7 @@ func (s *Store) AnnotateV1Events(index types.ChainIndex, timestamp time.Time, v1
 				sce := types.SiacoinElement{
 					StateElement: types.StateElement{
 						ID:        types.Hash256(txn.SiacoinOutputID(i)),
-						LeafIndex: types.EphemeralLeafIndex,
+						LeafIndex: types.UnassignedLeafIndex,
 					},
 					SiacoinOutput: output,
 				}
@@ -253,7 +253,7 @@ func (s *Store) AnnotateV1Events(index types.ChainIndex, timestamp time.Time, v1
 				sfe := types.SiafundElement{
 					StateElement: types.StateElement{
 						ID:        types.Hash256(txn.SiafundOutputID(i)),
-						LeafIndex: types.EphemeralLeafIndex,
+						LeafIndex: types.UnassignedLeafIndex,
 					},
 					SiafundOutput: output,
 				}

@@ -208,7 +208,7 @@ WHERE wa.wallet_id=$1`
 }
 
 // WalletSiacoinOutputs returns the unspent siacoin outputs for a wallet.
-func (s *Store) WalletSiacoinOutputs(id wallet.ID, offset, limit int) (siacoins []types.SiacoinElement, err error) {
+func (s *Store) WalletSiacoinOutputs(id wallet.ID, index types.ChainIndex, offset, limit int) (siacoins []types.SiacoinElement, err error) {
 	err = s.transaction(func(tx *txn) error {
 		if err := walletExists(tx, id); err != nil {
 			return err
@@ -217,10 +217,10 @@ func (s *Store) WalletSiacoinOutputs(id wallet.ID, offset, limit int) (siacoins 
 		const query = `SELECT se.id, se.siacoin_value, se.merkle_proof, se.leaf_index, se.maturity_height, sa.sia_address
 		FROM siacoin_elements se
 		INNER JOIN sia_addresses sa ON (se.address_id = sa.id)
-		WHERE se.spent_index_id IS NULL AND se.address_id IN (SELECT address_id FROM wallet_addresses WHERE wallet_id=$1)
-		LIMIT $2 OFFSET $3`
+		WHERE se.spent_index_id IS NULL AND se.maturity_height <= $1 AND se.address_id IN (SELECT address_id FROM wallet_addresses WHERE wallet_id=$2)
+		LIMIT $3 OFFSET $4`
 
-		rows, err := tx.Query(query, id, limit, offset)
+		rows, err := tx.Query(query, index.Height, id, limit, offset)
 		if err != nil {
 			return err
 		}
@@ -476,7 +476,7 @@ func (s *Store) WalletUnconfirmedEvents(id wallet.ID, index types.ChainIndex, ti
 				sce := types.SiacoinElement{
 					StateElement: types.StateElement{
 						ID:        types.Hash256(txn.SiacoinOutputID(i)),
-						LeafIndex: types.EphemeralLeafIndex,
+						LeafIndex: types.UnassignedLeafIndex,
 					},
 					SiacoinOutput: output,
 				}
@@ -515,7 +515,7 @@ func (s *Store) WalletUnconfirmedEvents(id wallet.ID, index types.ChainIndex, ti
 				sfe := types.SiafundElement{
 					StateElement: types.StateElement{
 						ID:        types.Hash256(txn.SiafundOutputID(i)),
-						LeafIndex: types.EphemeralLeafIndex,
+						LeafIndex: types.UnassignedLeafIndex,
 					},
 					SiafundOutput: output,
 				}
@@ -641,14 +641,31 @@ func fillElementProofs(tx *txn, indices []uint64) (proofs [][]types.Hash256, _ e
 }
 
 func getWalletEvents(tx *txn, id wallet.ID, offset, limit int) (events []wallet.Event, eventIDs []int64, err error) {
-	const query = `SELECT ev.id, ev.event_id, ev.maturity_height, ev.date_created, ci.height, ci.block_id, ev.event_type, ev.event_data
-	FROM events ev
+	// the events query can be slow in full index mode for wallets with no
+	// events. Check if the wallet has events first.
+	const hasEventsQuery = `SELECT EXISTS (
+  SELECT 1
+  FROM event_addresses ea
+  INNER JOIN wallet_addresses wa ON ea.address_id = wa.address_id
+  WHERE wa.wallet_id=$1
+) AS has_events;`
+	var hasEvents bool
+	if err := tx.QueryRow(hasEventsQuery, id).Scan(&hasEvents); err != nil {
+		return nil, nil, err
+	} else if !hasEvents {
+		return nil, nil, nil
+	}
+
+	const eventsQuery = `SELECT ev.id, ev.event_id, ev.maturity_height, ev.date_created, ci.height, ci.block_id, ev.event_type, ev.event_data
+	FROM events ev INDEXED BY events_maturity_height_id_idx -- force the index to prevent temp-btree sorts
+	INNER JOIN event_addresses ea ON (ev.id = ea.event_id)
+	INNER JOIN wallet_addresses wa ON (ea.address_id = wa.address_id)
 	INNER JOIN chain_indices ci ON (ev.chain_index_id = ci.id)
-	WHERE ev.id IN (SELECT event_id FROM event_addresses WHERE address_id IN (SELECT address_id FROM wallet_addresses WHERE wallet_id=$1))
+	WHERE wa.wallet_id=$1
 	ORDER BY ev.maturity_height DESC, ev.id DESC
 	LIMIT $2 OFFSET $3`
 
-	rows, err := tx.Query(query, id, limit, offset)
+	rows, err := tx.Query(eventsQuery, id, limit, offset)
 	if err != nil {
 		return nil, nil, err
 	}
