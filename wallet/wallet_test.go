@@ -3,6 +3,7 @@ package wallet_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -2881,7 +2882,11 @@ func taxAdjustedPayout(target types.Currency) types.Currency {
 }
 
 func TestEventTypes(t *testing.T) {
-	pk := types.GeneratePrivateKey()
+	var seed = make([]byte, 32)
+	seed[0] = 1
+	pk := types.NewPrivateKeyFromSeed(seed)
+	println("priv key:", hex.EncodeToString(pk))
+	println("pub key:", pk.PublicKey().String())
 	addr := types.StandardUnlockHash(pk.PublicKey())
 
 	log := zap.NewNop()
@@ -3628,4 +3633,17 @@ func TestEventTypes(t *testing.T) {
 		mineBlock(1, types.VoidAddress)
 		assertEvent(types.Hash256(types.SiafundOutputID(sfe[0].ID).V2ClaimOutputID()), wallet.EventTypeSiafundClaim, claimValue, types.ZeroCurrency, cm.Tip().Height+144)
 	})
+
+	events, err := wm.AddressEvents(addr, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := json.MarshalIndent(events, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Println(string(buf))
+	t.Fatal("for debugging")
 }
