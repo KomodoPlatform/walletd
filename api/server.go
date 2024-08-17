@@ -4,25 +4,48 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/pprof"
 	"reflect"
 	"runtime"
 	"sync"
 	"time"
 
 	"go.sia.tech/jape"
+	"go.uber.org/zap"
 	"lukechampine.com/frand"
 
 	"go.sia.tech/core/consensus"
 	"go.sia.tech/core/gateway"
 	"go.sia.tech/core/types"
+	"go.sia.tech/coreutils/chain"
 	"go.sia.tech/coreutils/syncer"
 	"go.sia.tech/walletd/build"
 	"go.sia.tech/walletd/wallet"
 )
 
+// A ServerOption sets an optional parameter for the server.
+type ServerOption func(*server)
+
+// WithLogger sets the logger used by the server.
+func WithLogger(log *zap.Logger) ServerOption {
+	return func(s *server) {
+		s.log = log
+	}
+}
+
+// WithDebug enables debug endpoints.
+func WithDebug() ServerOption {
+	return func(s *server) {
+		s.debugEnabled = true
+	}
+}
+
 type (
 	// A ChainManager manages blockchain and txpool state.
 	ChainManager interface {
+		UpdatesSince(types.ChainIndex, int) ([]chain.RevertUpdate, []chain.ApplyUpdate, error)
+
+		Tip() types.ChainIndex
 		BestIndex(height uint64) (types.ChainIndex, bool)
 		TipState() consensus.State
 		AddBlocks([]types.Block) error
@@ -82,11 +105,13 @@ type (
 )
 
 type server struct {
-	startTime time.Time
+	startTime    time.Time
+	debugEnabled bool
 
-	cm ChainManager
-	s  Syncer
-	wm WalletManager
+	log *zap.Logger
+	cm  ChainManager
+	s   Syncer
+	wm  WalletManager
 
 	// for walletsReserveHandler
 	mu   sync.Mutex
@@ -118,6 +143,56 @@ func (s *server) consensusTipHandler(jc jape.Context) {
 
 func (s *server) consensusTipStateHandler(jc jape.Context) {
 	jc.Encode(s.cm.TipState())
+}
+
+func (s *server) consensusIndexHeightHandler(jc jape.Context) {
+	var height uint64
+	if jc.DecodeParam("height", &height) != nil {
+		return
+	}
+	index, ok := s.cm.BestIndex(height)
+	if !ok {
+		jc.Error(errors.New("height not found"), http.StatusNotFound)
+		return
+	}
+	jc.Encode(index)
+}
+
+func (s *server) consensusUpdatesIndexHandler(jc jape.Context) {
+	var index types.ChainIndex
+	if jc.DecodeParam("index", &index) != nil {
+		return
+	}
+
+	limit := 10
+	if jc.DecodeForm("limit", &limit) != nil {
+		return
+	} else if limit <= 0 || limit > 100 {
+		jc.Error(errors.New("limit must be between 0 and 100"), http.StatusBadRequest)
+		return
+	}
+
+	reverted, applied, err := s.cm.UpdatesSince(index, limit)
+	if jc.Check("couldn't get updates", err) != nil {
+		return
+	}
+
+	var res ConsensusUpdatesResponse
+	for _, ru := range reverted {
+		res.Reverted = append(res.Reverted, RevertUpdate{
+			Update: ru.RevertUpdate,
+			State:  ru.State,
+			Block:  ru.Block,
+		})
+	}
+	for _, au := range applied {
+		res.Applied = append(res.Applied, ApplyUpdate{
+			Update: au.ApplyUpdate,
+			State:  au.State,
+			Block:  au.Block,
+		})
+	}
+	jc.Encode(res)
 }
 
 func (s *server) syncerPeersHandler(jc jape.Context) {
@@ -171,6 +246,15 @@ func (s *server) syncerBroadcastBlockHandler(jc jape.Context) {
 	} else {
 		s.s.BroadcastV2BlockOutline(gateway.OutlineBlock(b, s.cm.PoolTransactions(), s.cm.V2PoolTransactions()))
 	}
+}
+
+func (s *server) txpoolParentsHandler(jc jape.Context) {
+	var txn types.Transaction
+	if jc.Decode(&txn) != nil {
+		return
+	}
+
+	jc.Encode(s.cm.UnconfirmedParents(txn))
 }
 
 func (s *server) txpoolTransactionsHandler(jc jape.Context) {
@@ -752,27 +836,91 @@ func (s *server) outputsSiafundHandlerGET(jc jape.Context) {
 	jc.Encode(output)
 }
 
+func (s *server) debugMineHandler(jc jape.Context) {
+	var req DebugMineRequest
+	if jc.Decode(&req) != nil {
+		return
+	}
+
+	log := s.log.Named("miner")
+	ctx := jc.Request.Context()
+
+	for n := req.Blocks; n > 0; {
+		b, err := mineBlock(ctx, s.cm, req.Address)
+		if errors.Is(err, context.Canceled) {
+			return
+		} else if err != nil {
+			log.Warn("failed to mine block", zap.Error(err))
+		} else if err := s.cm.AddBlocks([]types.Block{b}); err != nil {
+			log.Warn("failed to add block", zap.Error(err))
+		}
+
+		if b.V2 == nil {
+			s.s.BroadcastHeader(gateway.BlockHeader{
+				ParentID:   b.ParentID,
+				Nonce:      b.Nonce,
+				Timestamp:  b.Timestamp,
+				MerkleRoot: b.MerkleRoot(),
+			})
+		} else {
+			s.s.BroadcastV2BlockOutline(gateway.OutlineBlock(b, s.cm.PoolTransactions(), s.cm.V2PoolTransactions()))
+		}
+
+		log.Debug("mined block", zap.Stringer("blockID", b.ID()))
+		n--
+	}
+}
+
+func (s *server) pprofHandler(jc jape.Context) {
+	var handler string
+	if err := jc.DecodeParam("handler", &handler); err != nil {
+		return
+	}
+
+	switch handler {
+	case "cmdline":
+		pprof.Cmdline(jc.ResponseWriter, jc.Request)
+	case "profile":
+		pprof.Profile(jc.ResponseWriter, jc.Request)
+	case "symbol":
+		pprof.Symbol(jc.ResponseWriter, jc.Request)
+	case "trace":
+		pprof.Trace(jc.ResponseWriter, jc.Request)
+	default:
+		pprof.Index(jc.ResponseWriter, jc.Request)
+	}
+	pprof.Index(jc.ResponseWriter, jc.Request)
+}
+
 // NewServer returns an HTTP handler that serves the walletd API.
-func NewServer(cm ChainManager, s Syncer, wm WalletManager) http.Handler {
+func NewServer(cm ChainManager, s Syncer, wm WalletManager, opts ...ServerOption) http.Handler {
 	srv := server{
-		startTime: time.Now(),
+		log:          zap.NewNop(),
+		debugEnabled: false,
+		startTime:    time.Now(),
 
 		cm:   cm,
 		s:    s,
 		wm:   wm,
 		used: make(map[types.Hash256]bool),
 	}
-	return jape.Mux(map[string]jape.Handler{
+	for _, opt := range opts {
+		opt(&srv)
+	}
+	handlers := map[string]jape.Handler{
 		"GET /state": srv.stateHandler,
 
-		"GET /consensus/network":  srv.consensusNetworkHandler,
-		"GET /consensus/tip":      srv.consensusTipHandler,
-		"GET /consensus/tipstate": srv.consensusTipStateHandler,
+		"GET /consensus/network":        srv.consensusNetworkHandler,
+		"GET /consensus/tip":            srv.consensusTipHandler,
+		"GET /consensus/tipstate":       srv.consensusTipStateHandler,
+		"GET /consensus/updates/:index": srv.consensusUpdatesIndexHandler,
+		"GET /consensus/index/:height":  srv.consensusIndexHeightHandler,
 
 		"GET /syncer/peers":            srv.syncerPeersHandler,
 		"POST /syncer/connect":         srv.syncerConnectHandler,
 		"POST /syncer/broadcast/block": srv.syncerBroadcastBlockHandler,
 
+		"POST /txpool/parents":     srv.txpoolParentsHandler,
 		"GET /txpool/transactions": srv.txpoolTransactionsHandler,
 		"GET /txpool/fee":          srv.txpoolFeeHandler,
 		"POST /txpool/broadcast":   srv.txpoolBroadcastHandler,
@@ -807,5 +955,12 @@ func NewServer(cm ChainManager, s Syncer, wm WalletManager) http.Handler {
 		"GET /outputs/siafund/:id": srv.outputsSiafundHandlerGET,
 
 		"GET /events/:id": srv.eventsHandlerGET,
-	})
+	}
+
+	if srv.debugEnabled {
+		handlers["POST /debug/mine"] = srv.debugMineHandler
+		handlers["GET /debug/pprof/:handler"] = srv.pprofHandler
+	}
+
+	return jape.Mux(handlers)
 }
