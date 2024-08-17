@@ -55,8 +55,11 @@ func runNode(ctx context.Context, cfg config.Config, log *zap.Logger, enableDebu
 	case "zen":
 		network, genesisBlock = chain.TestnetZen()
 		bootstrapPeers = syncer.ZenBootstrapPeers
+	case "komodo":
+		network, genesisBlock = chain.TestnetKomodo()
+		bootstrapPeers = syncer.KomodoBootstrapPeers
 	default:
-		return nil, errors.New("invalid network: must be one of 'mainnet', 'zen', 'anagami', or 'komodo'")
+		return errors.New("invalid network: must be one of 'mainnet', 'zen', 'anagami', or 'komodo")
 	}
 
 	bdb, err := coreutils.OpenBoltChainDB(filepath.Join(cfg.Directory, "consensus.db"))
