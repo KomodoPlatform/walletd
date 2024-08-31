@@ -1,5 +1,6 @@
 FROM docker.io/library/golang:1.23 AS builder
 
+
 WORKDIR /walletd
 
 # Install dependencies
@@ -22,15 +23,16 @@ LABEL maintainer="The Sia Foundation <info@sia.tech>" \
       org.opencontainers.image.source="https://github.com/SiaFoundation/walletd" \
       org.opencontainers.image.licenses=MIT
 
+
 ENV PUID=0
 ENV PGID=0
-
 ENV WALLETD_API_PASSWORD=password
+ENV WALLETD_CONFIG_FILE=/walletd/walletd.yml
 
 # copy binary and prepare data dir.
-COPY --from=builder /walletd/bin/* /usr/bin/
 VOLUME [ "/data" ]
-
+COPY --from=builder /walletd/bin/* /usr/bin/
+COPY --from=builder /walletd/walletd.yml /walletd/walletd.yml
 # API port
 EXPOSE 9980/tcp
 # RPC port
@@ -38,5 +40,4 @@ EXPOSE 9981/tcp
 
 USER ${PUID}:${PGID}
 
-ENV WALLETD_CONFIG_FILE=/data/walletd.yml
-ENTRYPOINT [ "walletd", "--dir", "/data", "--http", ":9980", "-network=komodo", "-index.mode=full", "-debug"]
+ENTRYPOINT [ "walletd", "-debug"]
