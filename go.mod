@@ -27,3 +27,8 @@ require (
 	golang.org/x/sys v0.24.0 // indirect
 	golang.org/x/tools v0.22.0 // indirect
 )
+
+// replace go.sia.tech/core => ../core
+// replace go.sia.tech/coreutils => ../coreutils
+replace go.sia.tech/core => github.com/alrighttt/core v0.0.0-20240817151302-1b7d22764744
+replace go.sia.tech/coreutils => github.com/alrighttt/coreutils v0.0.0-20240817154353-545b3b0dc85f

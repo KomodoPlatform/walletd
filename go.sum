@@ -1,5 +1,11 @@
 github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da h1:KjTM2ks9d14ZYCvmHS9iAKVt9AyzRSqNU1qabPih5BY=
 github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da/go.mod h1:eHEWzANqSiWQsof+nXEI9bUVUyV6F53Fp89EuCh2EAA=
+github.com/alrighttt/core v0.0.0-20240817151302-1b7d22764744 h1:ivDcxI81hK/sx8TuoBHRLY557vMi75f5xtXoSM0pHgg=
+github.com/alrighttt/core v0.0.0-20240817151302-1b7d22764744/go.mod h1:Zuq0Tn2aIXJyO0bjGu8cMeVWe+vwQnUfZhG1LCmjD5c=
+github.com/alrighttt/coreutils v0.0.0-20240817153038-e4ff01bbe8bd h1:FGOBrcreSV1wrwfKquymfOmNScWduAoIX1bJxyf7CFI=
+github.com/alrighttt/coreutils v0.0.0-20240817153038-e4ff01bbe8bd/go.mod h1:TjQITC7A7u3sX22sN54SmcPcn+YmnodEqzNElAA7G/s=
+github.com/alrighttt/coreutils v0.0.0-20240817154353-545b3b0dc85f h1:zhqProU5+zqFvVXtCmxIoKD8wQom/ufPYPqh+96DJcQ=
+github.com/alrighttt/coreutils v0.0.0-20240817154353-545b3b0dc85f/go.mod h1:gy4fYLy7Dleq8Qdq6yQTcHvOv8gX8d3EaBbAqBSAbak=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/julienschmidt/httprouter v1.3.0 h1:U0609e9tgbseu3rBINet9P48AI/D3oJs4dN7jwJOQ1U=
