@@ -1,0 +1,11 @@
+services:
+  walletd:
+    build: .
+    ports:
+      - 127.0.0.1:9980:9980/tcp
+      - 9981:9981/tcp
+    volumes:
+      - /data:/data
+    restart: unless-stopped
+    env_file:
+      - ./.env
