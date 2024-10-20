@@ -30,9 +30,8 @@ require (
 	golang.org/x/tools v0.22.0 // indirect
 )
 
-// replace go.sia.tech/core => ../core
-// replace go.sia.tech/coreutils => ../coreutils
-replace go.sia.tech/core => github.com/komodoplatform/sia-core v0.0.0-20240926043338-b95ae0bbcd81
+// replace go.sia.tech/core => ../sia-core
+// replace go.sia.tech/coreutils => ../sia-coreutils
+replace go.sia.tech/core => github.com/komodoplatform/sia-core v0.0.0-20241020010303-747b3a985158
 
-replace go.sia.tech/coreutils => github.com/komodoplatform/sia-coreutils v0.0.0-20240926041333-6eb275cc201d
-
+replace go.sia.tech/coreutils => github.com/komodoplatform/sia-coreutils v0.0.0-20241020010622-896d05538aef
