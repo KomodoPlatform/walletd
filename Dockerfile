@@ -14,12 +14,14 @@ COPY . .
 ENV CGO_ENABLED=1 
 
 RUN go generate ./...
+RUN go mod tidy
 RUN go build -o bin/ -tags='netgo timetzdata' -trimpath -a -ldflags '-s -w -linkmode external -extldflags "-static"'  ./cmd/walletd
 
 FROM docker.io/library/alpine:3
 
 ENV PUID=0
 ENV PGID=0
+# This is intended to be overridden at runtime via `-e WALLETD_API_PASSWORD=...`
 ENV WALLETD_API_PASSWORD=password
 
 # copy binary and prepare data dir.
