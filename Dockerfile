@@ -21,12 +21,10 @@ FROM docker.io/library/alpine:3
 ENV PUID=0
 ENV PGID=0
 ENV WALLETD_API_PASSWORD=password
-ENV WALLETD_CONFIG_FILE=/walletd/walletd.yml
 
 # copy binary and prepare data dir.
 VOLUME [ "/data" ]
 COPY --from=builder /walletd/bin/* /usr/bin/
-COPY --from=builder /walletd/walletd.yml /walletd/walletd.yml
 # API port
 EXPOSE 9980/tcp
 # RPC port
