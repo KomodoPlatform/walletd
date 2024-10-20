@@ -32,4 +32,8 @@ EXPOSE 9981/tcp
 
 USER ${PUID}:${PGID}
 
-ENTRYPOINT [ "walletd", "-debug"]
+# Dockerfile
+ENTRYPOINT ["walletd"]
+# Default arguments; will be overridden at runtime if any params are passed.
+# note: --dir is required to be set to /data or /tmp
+CMD ["--dir", "/data", "--http", ":9980", "-network=komodo", "-index.mode=full", "-debug"]
