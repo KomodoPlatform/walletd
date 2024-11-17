@@ -4,8 +4,8 @@ github.com/julienschmidt/httprouter v1.3.0 h1:U0609e9tgbseu3rBINet9P48AI/D3oJs4d
 github.com/julienschmidt/httprouter v1.3.0/go.mod h1:JR6WtHb+2LUe8TCKY3cZOxFyyO8IZAc4RVcycCCAKdM=
 github.com/komodoplatform/sia-core v0.0.0-20241115002219-ee2ef75c0973 h1:qxzzGyLbe+Kdc9oD0P5XCpGwZVAaG66Oz56XIfUCXk8=
 github.com/komodoplatform/sia-core v0.0.0-20241115002219-ee2ef75c0973/go.mod h1:4v+aT/33857tMfqa5j5OYlAoLsoIrd4d7qMlgeP+VGk=
-github.com/komodoplatform/sia-coreutils v0.0.0-20241115002258-952e5ce18b72 h1:JiFzSTEW9w6t27vWNMMlWVrnOs27ZlHNKt31g4TW9DU=
-github.com/komodoplatform/sia-coreutils v0.0.0-20241115002258-952e5ce18b72/go.mod h1:eMoqzqO4opKQ6n9tTTxHQmccfNlj+8RFOYuDSL/Qd4g=
+github.com/komodoplatform/sia-coreutils v0.0.0-20241117040949-4254d2c6cf30 h1:YYI6v10c+197gVxUfeOltVI8E6kAhZVUjlqjNnuB10E=
+github.com/komodoplatform/sia-coreutils v0.0.0-20241117040949-4254d2c6cf30/go.mod h1:eMoqzqO4opKQ6n9tTTxHQmccfNlj+8RFOYuDSL/Qd4g=
 github.com/mattn/go-sqlite3 v1.14.24 h1:tpSp2G2KyMnnQu99ngJ47EIkWVmliIizyZBfPrBWDRM=
 github.com/mattn/go-sqlite3 v1.14.24/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
