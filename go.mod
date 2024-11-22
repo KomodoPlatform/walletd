@@ -31,6 +31,6 @@ require (
 
 // replace go.sia.tech/core => ../sia-core
 // replace go.sia.tech/coreutils => ../sia-coreutils
-replace go.sia.tech/core => github.com/komodoplatform/sia-core v0.0.0-20241115002219-ee2ef75c0973
+replace go.sia.tech/core => github.com/komodoplatform/sia-core v0.0.0-20241122201700-fbeb493c0be1
 
-replace go.sia.tech/coreutils => github.com/komodoplatform/sia-coreutils v0.0.0-20241117040949-4254d2c6cf30
+replace go.sia.tech/coreutils => github.com/komodoplatform/sia-coreutils v0.0.0-20241122153804-5873e645f8b8
