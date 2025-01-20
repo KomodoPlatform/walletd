@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/pprof"
-	"reflect"
 	"runtime"
 	"sync"
 	"time"
 
 	"go.sia.tech/jape"
 	"go.uber.org/zap"
-	"lukechampine.com/frand"
 
 	"go.sia.tech/core/consensus"
 	"go.sia.tech/core/gateway"
@@ -71,6 +69,7 @@ type (
 		AddPoolTransactions(txns []types.Transaction) (bool, error)
 		AddV2PoolTransactions(index types.ChainIndex, txns []types.V2Transaction) (bool, error)
 		UnconfirmedParents(txn types.Transaction) []types.Transaction
+		UpdateV2TransactionSet(txns []types.V2Transaction, from types.ChainIndex, to types.ChainIndex) ([]types.V2Transaction, error)
 	}
 
 	// A Syncer can connect to other peers and synchronize the blockchain.
@@ -79,7 +78,7 @@ type (
 		Peers() []*syncer.Peer
 		PeerInfo(addr string) (syncer.PeerInfo, error)
 		Connect(ctx context.Context, addr string) (*syncer.Peer, error)
-		BroadcastHeader(bh gateway.BlockHeader)
+		BroadcastHeader(types.BlockHeader)
 		BroadcastTransactionSet(txns []types.Transaction)
 		BroadcastV2TransactionSet(index types.ChainIndex, txns []types.V2Transaction)
 		BroadcastV2BlockOutline(bo gateway.V2BlockOutline)
@@ -99,10 +98,13 @@ type (
 		AddAddress(id wallet.ID, addr wallet.Address) error
 		RemoveAddress(id wallet.ID, addr types.Address) error
 		Addresses(id wallet.ID) ([]wallet.Address, error)
+		WalletAddress(wallet.ID, types.Address) (wallet.Address, error)
 		WalletEvents(id wallet.ID, offset, limit int) ([]wallet.Event, error)
 		WalletUnconfirmedEvents(id wallet.ID) ([]wallet.Event, error)
-		UnspentSiacoinOutputs(id wallet.ID, offset, limit int) ([]types.SiacoinElement, error)
-		UnspentSiafundOutputs(id wallet.ID, offset, limit int) ([]types.SiafundElement, error)
+		SelectSiacoinElements(walletID wallet.ID, amount types.Currency, useUnconfirmed bool) ([]types.SiacoinElement, types.ChainIndex, types.Currency, error)
+		SelectSiafundElements(walletID wallet.ID, amount uint64) ([]types.SiafundElement, types.ChainIndex, uint64, error)
+		UnspentSiacoinOutputs(id wallet.ID, offset, limit int) ([]types.SiacoinElement, types.ChainIndex, error)
+		UnspentSiafundOutputs(id wallet.ID, offset, limit int) ([]types.SiafundElement, types.ChainIndex, error)
 		WalletBalance(id wallet.ID) (wallet.Balance, error)
 
 		AddressBalance(address types.Address) (wallet.Balance, error)
@@ -116,7 +118,8 @@ type (
 		SiacoinElement(types.SiacoinOutputID) (types.SiacoinElement, error)
 		SiafundElement(types.SiafundOutputID) (types.SiafundElement, error)
 
-		Reserve(ids []types.Hash256, duration time.Duration) error
+		Reserve([]types.Hash256) error
+		Release([]types.Hash256)
 	}
 )
 
@@ -130,10 +133,6 @@ type server struct {
 	cm  ChainManager
 	s   Syncer
 	wm  WalletManager
-
-	// for walletsReserveHandler
-	mu   sync.Mutex
-	used map[types.Hash256]bool
 
 	scanMu         sync.Mutex // for resubscribe
 	scanInProgress bool
@@ -258,12 +257,7 @@ func (s *server) syncerBroadcastBlockHandler(jc jape.Context) {
 		return
 	}
 	if b.V2 == nil {
-		s.s.BroadcastHeader(gateway.BlockHeader{
-			ParentID:   b.ParentID,
-			Nonce:      b.Nonce,
-			Timestamp:  b.Timestamp,
-			MerkleRoot: b.MerkleRoot(),
-		})
+		s.s.BroadcastHeader(b.Header())
 	} else {
 		s.s.BroadcastV2BlockOutline(gateway.OutlineBlock(b, s.cm.PoolTransactions(), s.cm.V2PoolTransactions()))
 	}
@@ -281,6 +275,7 @@ func (s *server) txpoolParentsHandler(jc jape.Context) {
 
 func (s *server) txpoolTransactionsHandler(jc jape.Context) {
 	jc.Encode(TxpoolTransactionsResponse{
+		Basis:          s.cm.Tip(),
 		Transactions:   s.cm.PoolTransactions(),
 		V2Transactions: s.cm.V2PoolTransactions(),
 	})
@@ -304,13 +299,12 @@ func (s *server) txpoolBroadcastHandler(jc jape.Context) {
 		s.s.BroadcastTransactionSet(tbr.Transactions)
 	}
 	if len(tbr.V2Transactions) != 0 {
-		index := s.cm.TipState().Index
-		_, err := s.cm.AddV2PoolTransactions(index, tbr.V2Transactions)
+		_, err := s.cm.AddV2PoolTransactions(tbr.Basis, tbr.V2Transactions)
 		if err != nil {
 			jc.Error(fmt.Errorf("invalid v2 transaction set: %w", err), http.StatusBadRequest)
 			return
 		}
-		s.s.BroadcastV2TransactionSet(index, tbr.V2Transactions)
+		s.s.BroadcastV2TransactionSet(tbr.Basis, tbr.V2Transactions)
 	}
 
 	jc.EmptyResonse()
@@ -538,7 +532,7 @@ func (s *server) walletsOutputsSiacoinHandler(jc jape.Context) {
 		return
 	}
 
-	scos, err := s.wm.UnspentSiacoinOutputs(id, offset, limit)
+	scos, _, err := s.wm.UnspentSiacoinOutputs(id, offset, limit)
 	if jc.Check("couldn't load siacoin outputs", err) != nil {
 		return
 	}
@@ -557,7 +551,7 @@ func (s *server) walletsOutputsSiafundHandler(jc jape.Context) {
 		return
 	}
 
-	sfos, err := s.wm.UnspentSiafundOutputs(id, offset, limit)
+	sfos, _, err := s.wm.UnspentSiafundOutputs(id, offset, limit)
 	if jc.Check("couldn't load siacoin outputs", err) != nil {
 		return
 	}
@@ -579,95 +573,62 @@ func (s *server) walletsReserveHandler(jc jape.Context) {
 		ids = append(ids, types.Hash256(id))
 	}
 
-	if jc.Check("couldn't reserve outputs", s.wm.Reserve(ids, wrr.Duration)) != nil {
+	if jc.Check("couldn't reserve outputs", s.wm.Reserve(ids)) != nil {
 		return
 	}
 	jc.EmptyResonse()
 }
 
 func (s *server) walletsReleaseHandler(jc jape.Context) {
-	var name string
 	var wrr WalletReleaseRequest
-	if jc.DecodeParam("name", &name) != nil || jc.Decode(&wrr) != nil {
+	if jc.Decode(&wrr) != nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+
+	ids := make([]types.Hash256, 0, len(wrr.SiacoinOutputs)+len(wrr.SiafundOutputs))
 	for _, id := range wrr.SiacoinOutputs {
-		delete(s.used, types.Hash256(id))
+		ids = append(ids, types.Hash256(id))
 	}
 	for _, id := range wrr.SiafundOutputs {
-		delete(s.used, types.Hash256(id))
+		ids = append(ids, types.Hash256(id))
 	}
+	s.wm.Release(ids)
 	jc.EmptyResonse()
 }
 
 func (s *server) walletsFundHandler(jc jape.Context) {
-	fundTxn := func(txn *types.Transaction, amount types.Currency, utxos []types.SiacoinElement, changeAddr types.Address, pool []types.Transaction) ([]types.Hash256, error) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if amount.IsZero() {
-			return nil, nil
-		}
-		inPool := make(map[types.Hash256]bool)
-		for _, ptxn := range pool {
-			for _, in := range ptxn.SiacoinInputs {
-				inPool[types.Hash256(in.ParentID)] = true
-			}
-		}
-		frand.Shuffle(len(utxos), reflect.Swapper(utxos))
-		var outputSum types.Currency
-		var fundingElements []types.SiacoinElement
-		for _, sce := range utxos {
-			if s.used[types.Hash256(sce.ID)] || inPool[types.Hash256(sce.ID)] {
-				continue
-			}
-			fundingElements = append(fundingElements, sce)
-			outputSum = outputSum.Add(sce.SiacoinOutput.Value)
-			if outputSum.Cmp(amount) >= 0 {
-				break
-			}
-		}
-		if outputSum.Cmp(amount) < 0 {
-			return nil, errors.New("insufficient balance")
-		} else if outputSum.Cmp(amount) > 0 {
-			if changeAddr == types.VoidAddress {
-				return nil, errors.New("change address must be specified")
-			}
-			txn.SiacoinOutputs = append(txn.SiacoinOutputs, types.SiacoinOutput{
-				Value:   outputSum.Sub(amount),
-				Address: changeAddr,
-			})
-		}
-
-		toSign := make([]types.Hash256, len(fundingElements))
-		for i, sce := range fundingElements {
-			txn.SiacoinInputs = append(txn.SiacoinInputs, types.SiacoinInput{
-				ParentID: types.SiacoinOutputID(sce.ID),
-				// UnlockConditions left empty for client to fill in
-			})
-			toSign[i] = types.Hash256(sce.ID)
-			s.used[types.Hash256(sce.ID)] = true
-		}
-
-		return toSign, nil
-	}
-
 	var id wallet.ID
 	var wfr WalletFundRequest
 	if jc.DecodeParam("id", &id) != nil || jc.Decode(&wfr) != nil {
 		return
 	}
-	utxos, err := s.wm.UnspentSiacoinOutputs(id, 0, 1000)
+	utxos, _, change, err := s.wm.SelectSiacoinElements(id, wfr.Amount, false)
 	if jc.Check("couldn't get utxos to fund transaction", err) != nil {
 		return
 	}
 
 	txn := wfr.Transaction
-	toSign, err := fundTxn(&txn, wfr.Amount, utxos, wfr.ChangeAddress, s.cm.PoolTransactions())
-	if jc.Check("couldn't fund transaction", err) != nil {
-		return
+	if !change.IsZero() {
+		if wfr.ChangeAddress == types.VoidAddress {
+			jc.Error(errors.New("change address must be specified"), http.StatusBadRequest)
+			return
+		}
+
+		txn.SiacoinOutputs = append(txn.SiacoinOutputs, types.SiacoinOutput{
+			Value:   change,
+			Address: wfr.ChangeAddress,
+		})
 	}
+
+	toSign := make([]types.Hash256, 0, len(utxos))
+	for _, sce := range utxos {
+		txn.SiacoinInputs = append(txn.SiacoinInputs, types.SiacoinInput{
+			ParentID: sce.ID,
+			// UnlockConditions left empty for client to fill in
+		})
+		toSign = append(toSign, types.Hash256(sce.ID))
+	}
+
 	jc.Encode(WalletFundResponse{
 		Transaction: txn,
 		ToSign:      toSign,
@@ -676,77 +637,424 @@ func (s *server) walletsFundHandler(jc jape.Context) {
 }
 
 func (s *server) walletsFundSFHandler(jc jape.Context) {
-	fundTxn := func(txn *types.Transaction, amount uint64, utxos []types.SiafundElement, changeAddr, claimAddr types.Address, pool []types.Transaction) ([]types.Hash256, error) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if amount == 0 {
-			return nil, nil
-		}
-		inPool := make(map[types.Hash256]bool)
-		for _, ptxn := range pool {
-			for _, in := range ptxn.SiafundInputs {
-				inPool[types.Hash256(in.ParentID)] = true
-			}
-		}
-		frand.Shuffle(len(utxos), reflect.Swapper(utxos))
-		var outputSum uint64
-		var fundingElements []types.SiafundElement
-		for _, sfe := range utxos {
-			if s.used[types.Hash256(sfe.ID)] || inPool[types.Hash256(sfe.ID)] {
-				continue
-			}
-			fundingElements = append(fundingElements, sfe)
-			outputSum += sfe.SiafundOutput.Value
-			if outputSum >= amount {
-				break
-			}
-		}
-		if outputSum < amount {
-			return nil, errors.New("insufficient balance")
-		} else if outputSum > amount {
-			if changeAddr == types.VoidAddress {
-				return nil, errors.New("change address must be specified")
-			}
-			txn.SiafundOutputs = append(txn.SiafundOutputs, types.SiafundOutput{
-				Value:   outputSum - amount,
-				Address: changeAddr,
-			})
-		}
-
-		toSign := make([]types.Hash256, len(fundingElements))
-		for i, sfe := range fundingElements {
-			txn.SiafundInputs = append(txn.SiafundInputs, types.SiafundInput{
-				ParentID:     types.SiafundOutputID(sfe.ID),
-				ClaimAddress: claimAddr,
-				// UnlockConditions left empty for client to fill in
-			})
-			toSign[i] = types.Hash256(sfe.ID)
-			s.used[types.Hash256(sfe.ID)] = true
-		}
-
-		return toSign, nil
-	}
-
 	var id wallet.ID
 	var wfr WalletFundSFRequest
 	if jc.DecodeParam("id", &id) != nil || jc.Decode(&wfr) != nil {
 		return
 	}
-	utxos, err := s.wm.UnspentSiafundOutputs(id, 0, 1000)
+	utxos, _, change, err := s.wm.SelectSiafundElements(id, wfr.Amount)
 	if jc.Check("couldn't get utxos to fund transaction", err) != nil {
 		return
 	}
 
 	txn := wfr.Transaction
-	toSign, err := fundTxn(&txn, wfr.Amount, utxos, wfr.ChangeAddress, wfr.ClaimAddress, s.cm.PoolTransactions())
-	if jc.Check("couldn't fund transaction", err) != nil {
-		return
+	if change > 0 {
+		if wfr.ChangeAddress == types.VoidAddress {
+			jc.Error(errors.New("change address must be specified"), http.StatusBadRequest)
+			return
+		}
+
+		txn.SiafundOutputs = append(txn.SiafundOutputs, types.SiafundOutput{
+			Value:   change,
+			Address: wfr.ChangeAddress,
+		})
+	}
+
+	toSign := make([]types.Hash256, 0, len(utxos))
+	for _, sce := range utxos {
+		txn.SiafundInputs = append(txn.SiafundInputs, types.SiafundInput{
+			ParentID:     sce.ID,
+			ClaimAddress: wfr.ChangeAddress,
+			// UnlockConditions left empty for client to fill in
+		})
+		toSign = append(toSign, types.Hash256(sce.ID))
 	}
 	jc.Encode(WalletFundResponse{
 		Transaction: txn,
 		ToSign:      toSign,
 		DependsOn:   s.cm.UnconfirmedParents(txn),
 	})
+}
+
+func (s *server) walletsConstructHandler(jc jape.Context) {
+	cs := s.cm.TipState()
+	if cs.Index.Height >= cs.Network.HardforkV2.RequireHeight {
+		jc.Error(errors.New("v1 transactions are not allowed after the v2 require height"), http.StatusBadRequest)
+	}
+
+	var walletID wallet.ID
+	if err := jc.DecodeParam("id", &walletID); err != nil {
+		return
+	}
+
+	_, err := s.wm.WalletBalance(walletID)
+	if errors.Is(err, wallet.ErrNotFound) {
+		jc.Error(err, http.StatusNotFound)
+		return
+	} else if jc.Check("failed to get wallet", err) != nil {
+		return
+	}
+
+	var wcr WalletConstructRequest
+	if err := jc.Decode(&wcr); err != nil {
+		return
+	}
+
+	if wcr.ChangeAddress == types.VoidAddress {
+		jc.Error(errors.New("change address must be specified"), http.StatusBadRequest)
+		return
+	}
+
+	var siacoinInput types.Currency
+	for i, sco := range wcr.Siacoins {
+		switch {
+		case sco.Value.IsZero():
+			jc.Error(fmt.Errorf("siacoin output %d has zero value", i), http.StatusBadRequest)
+			return
+		case sco.Address == types.VoidAddress:
+			jc.Error(fmt.Errorf("siacoin output %d has void address", i), http.StatusBadRequest)
+			return
+		}
+		siacoinInput = siacoinInput.Add(sco.Value)
+	}
+
+	var siafundInput uint64
+	for i, sfo := range wcr.Siafunds {
+		switch {
+		case sfo.Value == 0:
+			jc.Error(fmt.Errorf("siafund output %d has zero value", i), http.StatusBadRequest)
+			return
+		case sfo.Address == types.VoidAddress:
+			jc.Error(fmt.Errorf("siafund output %d has void address", i), http.StatusBadRequest)
+			return
+		}
+		siafundInput += sfo.Value
+	}
+
+	if siacoinInput.IsZero() && siafundInput == 0 {
+		jc.Error(errors.New("no inputs provided"), http.StatusBadRequest)
+	}
+
+	fee := s.cm.RecommendedFee().Mul64(2000) // use a const for simplicity
+
+	var sent bool
+	var locked []types.Hash256
+	defer func() {
+		if sent {
+			return
+		}
+		s.wm.Release(locked)
+	}()
+
+	sces, basis, siacoinChange, err := s.wm.SelectSiacoinElements(walletID, siacoinInput.Add(fee), false)
+	if err != nil {
+		jc.Error(fmt.Errorf("failed to select siacoin elements: %w", err), http.StatusInternalServerError)
+		return
+	}
+	for _, sce := range sces {
+		locked = append(locked, types.Hash256(sce.ID))
+	}
+
+	if !siacoinChange.IsZero() {
+		wcr.Siacoins = append(wcr.Siacoins, types.SiacoinOutput{
+			Value:   siacoinChange,
+			Address: wcr.ChangeAddress,
+		})
+	}
+
+	sfes, _, siafundChange, err := s.wm.SelectSiafundElements(walletID, siafundInput)
+	if err != nil {
+		jc.Error(fmt.Errorf("failed to select siafund elements: %w", err), http.StatusInternalServerError)
+		return
+	}
+	for _, sfe := range sfes {
+		locked = append(locked, types.Hash256(sfe.ID))
+	}
+
+	if siafundChange > 0 {
+		wcr.Siafunds = append(wcr.Siafunds, types.SiafundOutput{
+			Value:   siafundChange,
+			Address: wcr.ChangeAddress,
+		})
+	}
+
+	knownAddresses := make(map[types.Address]wallet.Address)
+	getAddress := func(addr types.Address) (wallet.Address, error) {
+		if a, ok := knownAddresses[addr]; ok {
+			return a, nil
+		}
+		a, err := s.wm.WalletAddress(walletID, addr)
+		if err != nil {
+			return wallet.Address{}, err
+		}
+		knownAddresses[addr] = a
+		return a, nil
+	}
+
+	resp := WalletConstructResponse{
+		Basis:        basis,
+		EstimatedFee: fee,
+	}
+
+	txn := types.Transaction{
+		MinerFees:      []types.Currency{fee},
+		SiacoinInputs:  make([]types.SiacoinInput, 0, len(sces)),
+		SiacoinOutputs: wcr.Siacoins,
+		SiafundInputs:  make([]types.SiafundInput, 0, len(sfes)),
+		SiafundOutputs: wcr.Siafunds,
+	}
+
+	for _, sce := range sces {
+		addr, err := getAddress(sce.SiacoinOutput.Address)
+		if err != nil {
+			jc.Error(fmt.Errorf("failed to get address: %w", err), http.StatusInternalServerError)
+			return
+		}
+
+		sci := types.SiacoinInput{
+			ParentID: sce.ID,
+		}
+
+		if addr.SpendPolicy != nil {
+			// best effort to fill unlock conditions
+			uc, ok := addr.SpendPolicy.Type.(types.PolicyTypeUnlockConditions)
+			if !ok {
+				jc.Error(fmt.Errorf("address %q only unlock conditions are suppored in v1 transactions", addr.Address), http.StatusBadRequest)
+				return
+			}
+			sci.UnlockConditions = types.UnlockConditions(uc)
+		}
+
+		txn.SiacoinInputs = append(txn.SiacoinInputs, sci)
+		txn.Signatures = append(txn.Signatures, types.TransactionSignature{
+			ParentID: types.Hash256(sce.ID),
+			CoveredFields: types.CoveredFields{
+				WholeTransaction: true,
+			},
+		})
+	}
+
+	for _, sfe := range sfes {
+		addr, err := getAddress(sfe.SiafundOutput.Address)
+		if err != nil {
+			jc.Error(fmt.Errorf("failed to get address: %w", err), http.StatusInternalServerError)
+			return
+		}
+
+		sfi := types.SiafundInput{
+			ParentID:     sfe.ID,
+			ClaimAddress: wcr.ChangeAddress,
+		}
+		if addr.SpendPolicy != nil {
+			// best effort to fill unlock conditions
+			uc, ok := addr.SpendPolicy.Type.(types.PolicyTypeUnlockConditions)
+			if !ok {
+				jc.Error(fmt.Errorf("address %q only unlock conditions are suppored in v1 transactions", addr.Address), http.StatusBadRequest)
+				return
+			}
+			sfi.UnlockConditions = types.UnlockConditions(uc)
+		}
+		txn.SiafundInputs = append(txn.SiafundInputs, sfi)
+		txn.Signatures = append(txn.Signatures, types.TransactionSignature{
+			ParentID: types.Hash256(sfe.ID),
+			CoveredFields: types.CoveredFields{
+				WholeTransaction: true,
+			},
+		})
+	}
+
+	resp.ID = txn.ID()
+	resp.Transaction = txn
+	sent = true // locks are released in defer
+	jc.Encode(resp)
+}
+
+func (s *server) walletsConstructV2Handler(jc jape.Context) {
+	cs := s.cm.TipState()
+	if cs.Index.Height < cs.Network.HardforkV2.AllowHeight {
+		jc.Error(errors.New("v2 transactions are not allowed before the v2 allow height"), http.StatusBadRequest)
+	}
+
+	var walletID wallet.ID
+	if err := jc.DecodeParam("id", &walletID); err != nil {
+		return
+	}
+
+	_, err := s.wm.WalletBalance(walletID)
+	if errors.Is(err, wallet.ErrNotFound) {
+		jc.Error(err, http.StatusNotFound)
+		return
+	} else if jc.Check("failed to get wallet", err) != nil {
+		return
+	}
+
+	var wcr WalletConstructRequest
+	if err := jc.Decode(&wcr); err != nil {
+		return
+	}
+
+	if wcr.ChangeAddress == types.VoidAddress {
+		jc.Error(errors.New("change address must be specified"), http.StatusBadRequest)
+		return
+	}
+
+	var siacoinInput types.Currency
+	for i, sco := range wcr.Siacoins {
+		switch {
+		case sco.Value.IsZero():
+			jc.Error(fmt.Errorf("siacoin output %d has zero value", i), http.StatusBadRequest)
+			return
+		case sco.Address == types.VoidAddress:
+			jc.Error(fmt.Errorf("siacoin output %d has void address", i), http.StatusBadRequest)
+			return
+		}
+		siacoinInput = siacoinInput.Add(sco.Value)
+	}
+
+	var siafundInput uint64
+	for i, sfo := range wcr.Siafunds {
+		switch {
+		case sfo.Value == 0:
+			jc.Error(fmt.Errorf("siafund output %d has zero value", i), http.StatusBadRequest)
+			return
+		case sfo.Address == types.VoidAddress:
+			jc.Error(fmt.Errorf("siafund output %d has void address", i), http.StatusBadRequest)
+			return
+		}
+		siafundInput += sfo.Value
+	}
+
+	if siacoinInput.IsZero() && siafundInput == 0 {
+		jc.Error(errors.New("no inputs provided"), http.StatusBadRequest)
+	}
+
+	fee := s.cm.RecommendedFee().Mul64(2000) // use a const for simplicity
+
+	var sent bool
+	var locked []types.Hash256
+	defer func() {
+		if sent {
+			return
+		}
+		s.wm.Release(locked)
+	}()
+
+	sces, basis, siacoinChange, err := s.wm.SelectSiacoinElements(walletID, siacoinInput.Add(fee), false)
+	if err != nil {
+		jc.Error(fmt.Errorf("failed to select siacoin elements: %w", err), http.StatusInternalServerError)
+		return
+	}
+	for _, sce := range sces {
+		locked = append(locked, types.Hash256(sce.ID))
+	}
+
+	if !siacoinChange.IsZero() {
+		wcr.Siacoins = append(wcr.Siacoins, types.SiacoinOutput{
+			Value:   siacoinChange,
+			Address: wcr.ChangeAddress,
+		})
+	}
+
+	sfes, sfBasis, siafundChange, err := s.wm.SelectSiafundElements(walletID, siafundInput)
+	if err != nil {
+		jc.Error(fmt.Errorf("failed to select siafund elements: %w", err), http.StatusInternalServerError)
+		return
+	}
+	for _, sfe := range sfes {
+		locked = append(locked, types.Hash256(sfe.ID))
+	}
+
+	if siafundChange > 0 {
+		wcr.Siafunds = append(wcr.Siafunds, types.SiafundOutput{
+			Value:   siafundChange,
+			Address: wcr.ChangeAddress,
+		})
+	}
+
+	knownAddresses := make(map[types.Address]wallet.Address)
+	getAddress := func(addr types.Address) (wallet.Address, error) {
+		if a, ok := knownAddresses[addr]; ok {
+			return a, nil
+		}
+		a, err := s.wm.WalletAddress(walletID, addr)
+		if err != nil {
+			return wallet.Address{}, err
+		}
+		knownAddresses[addr] = a
+		return a, nil
+	}
+
+	resp := WalletConstructV2Response{
+		Basis:        basis,
+		EstimatedFee: fee,
+	}
+
+	txn := types.V2Transaction{
+		MinerFee:       fee,
+		SiacoinInputs:  make([]types.V2SiacoinInput, 0, len(sces)),
+		SiacoinOutputs: wcr.Siacoins,
+		SiafundInputs:  make([]types.V2SiafundInput, 0, len(sfes)),
+		SiafundOutputs: wcr.Siafunds,
+	}
+
+	// the siafund elements are added to the transaction first because `UpdateV2TransactionSet` takes
+	// a V2 transaction as an argument. The Siacoin basis is our target because the transaction is
+	// guaranteed to have a non-zero Siacoin basis while the Siafund basis will be zero when not
+	// sending Siafunds.
+	for _, sfe := range sfes {
+		addr, err := getAddress(sfe.SiafundOutput.Address)
+		if err != nil {
+			jc.Error(fmt.Errorf("failed to get address: %w", err), http.StatusInternalServerError)
+			return
+		}
+
+		sfi := types.V2SiafundInput{
+			Parent:       sfe,
+			ClaimAddress: wcr.ChangeAddress,
+		}
+
+		if addr.SpendPolicy != nil {
+			// best effort to fill spend policy
+			sfi.SatisfiedPolicy = types.SatisfiedPolicy{
+				Policy: *addr.SpendPolicy,
+			}
+		}
+		txn.SiafundInputs = append(txn.SiafundInputs, sfi)
+	}
+
+	if len(sfes) > 0 && basis != sfBasis {
+		txnset, err := s.cm.UpdateV2TransactionSet([]types.V2Transaction{txn}, sfBasis, basis)
+		if err != nil {
+			jc.Error(fmt.Errorf("failed to update transaction set: %w", err), http.StatusInternalServerError)
+			return
+		}
+		txn = txnset[0]
+	}
+
+	for _, sce := range sces {
+		addr, err := getAddress(sce.SiacoinOutput.Address)
+		if err != nil {
+			jc.Error(fmt.Errorf("failed to get address: %w", err), http.StatusInternalServerError)
+			return
+		}
+
+		sci := types.V2SiacoinInput{
+			Parent: sce,
+		}
+
+		if addr.SpendPolicy != nil {
+			// best effort to fill spend policy
+			sci.SatisfiedPolicy = types.SatisfiedPolicy{
+				Policy: *addr.SpendPolicy,
+			}
+		}
+		txn.SiacoinInputs = append(txn.SiacoinInputs, sci)
+	}
+
+	resp.ID = txn.ID()
+	resp.Transaction = txn
+	sent = true // locks are released in defer
+	jc.Encode(resp)
 }
 
 func (s *server) addressesAddrBalanceHandler(jc jape.Context) {
@@ -889,12 +1197,7 @@ func (s *server) debugMineHandler(jc jape.Context) {
 		}
 
 		if b.V2 == nil {
-			s.s.BroadcastHeader(gateway.BlockHeader{
-				ParentID:   b.ParentID,
-				Nonce:      b.Nonce,
-				Timestamp:  b.Timestamp,
-				MerkleRoot: b.MerkleRoot(),
-			})
+			s.s.BroadcastHeader(b.Header())
 		} else {
 			s.s.BroadcastV2BlockOutline(gateway.OutlineBlock(b, s.cm.PoolTransactions(), s.cm.V2PoolTransactions()))
 		}
@@ -934,10 +1237,9 @@ func NewServer(cm ChainManager, s Syncer, wm WalletManager, opts ...ServerOption
 		publicEndpoints: false,
 		startTime:       time.Now(),
 
-		cm:   cm,
-		s:    s,
-		wm:   wm,
-		used: make(map[types.Hash256]bool),
+		cm: cm,
+		s:  s,
+		wm: wm,
 	}
 	for _, opt := range opts {
 		opt(&srv)
@@ -1013,22 +1315,24 @@ func NewServer(cm ChainManager, s Syncer, wm WalletManager, opts ...ServerOption
 		"GET /rescan":  wrapAuthHandler(srv.rescanHandlerGET),
 		"POST /rescan": wrapAuthHandler(srv.rescanHandlerPOST),
 
-		"GET /wallets":                        wrapAuthHandler(srv.walletsHandler),
-		"POST /wallets":                       wrapAuthHandler(srv.walletsHandlerPOST),
-		"POST /wallets/:id":                   wrapAuthHandler(srv.walletsIDHandlerPOST),
-		"DELETE	/wallets/:id":                 wrapAuthHandler(srv.walletsIDHandlerDELETE),
-		"PUT /wallets/:id/addresses":          wrapAuthHandler(srv.walletsAddressHandlerPUT),
-		"DELETE /wallets/:id/addresses/:addr": wrapAuthHandler(srv.walletsAddressHandlerDELETE),
-		"GET /wallets/:id/addresses":          wrapAuthHandler(srv.walletsAddressesHandlerGET),
-		"GET /wallets/:id/balance":            wrapAuthHandler(srv.walletsBalanceHandler),
-		"GET /wallets/:id/events":             wrapAuthHandler(srv.walletsEventsHandler),
-		"GET /wallets/:id/events/unconfirmed": wrapAuthHandler(srv.walletsEventsUnconfirmedHandlerGET),
-		"GET /wallets/:id/outputs/siacoin":    wrapAuthHandler(srv.walletsOutputsSiacoinHandler),
-		"GET /wallets/:id/outputs/siafund":    wrapAuthHandler(srv.walletsOutputsSiafundHandler),
-		"POST /wallets/:id/reserve":           wrapAuthHandler(srv.walletsReserveHandler),
-		"POST /wallets/:id/release":           wrapAuthHandler(srv.walletsReleaseHandler),
-		"POST /wallets/:id/fund":              wrapAuthHandler(srv.walletsFundHandler),
-		"POST /wallets/:id/fundsf":            wrapAuthHandler(srv.walletsFundSFHandler),
+		"GET /wallets":                               wrapAuthHandler(srv.walletsHandler),
+		"POST /wallets":                              wrapAuthHandler(srv.walletsHandlerPOST),
+		"POST /wallets/:id":                          wrapAuthHandler(srv.walletsIDHandlerPOST),
+		"DELETE	/wallets/:id":                        wrapAuthHandler(srv.walletsIDHandlerDELETE),
+		"PUT /wallets/:id/addresses":                 wrapAuthHandler(srv.walletsAddressHandlerPUT),
+		"DELETE /wallets/:id/addresses/:addr":        wrapAuthHandler(srv.walletsAddressHandlerDELETE),
+		"GET /wallets/:id/addresses":                 wrapAuthHandler(srv.walletsAddressesHandlerGET),
+		"GET /wallets/:id/balance":                   wrapAuthHandler(srv.walletsBalanceHandler),
+		"GET /wallets/:id/events":                    wrapAuthHandler(srv.walletsEventsHandler),
+		"POST /wallets/:id/construct/transaction":    wrapAuthHandler(srv.walletsConstructHandler),
+		"POST /wallets/:id/construct/v2/transaction": wrapAuthHandler(srv.walletsConstructV2Handler),
+		"GET /wallets/:id/events/unconfirmed":        wrapAuthHandler(srv.walletsEventsUnconfirmedHandlerGET),
+		"GET /wallets/:id/outputs/siacoin":           wrapAuthHandler(srv.walletsOutputsSiacoinHandler),
+		"GET /wallets/:id/outputs/siafund":           wrapAuthHandler(srv.walletsOutputsSiafundHandler),
+		"POST /wallets/:id/reserve":                  wrapAuthHandler(srv.walletsReserveHandler),
+		"POST /wallets/:id/release":                  wrapAuthHandler(srv.walletsReleaseHandler),
+		"POST /wallets/:id/fund":                     wrapAuthHandler(srv.walletsFundHandler),
+		"POST /wallets/:id/fundsf":                   wrapAuthHandler(srv.walletsFundSFHandler),
 	}
 
 	if srv.debugEnabled {

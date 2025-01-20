@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -18,9 +20,7 @@ import (
 func readPasswordInput(context string) string {
 	fmt.Printf("%s: ", context)
 	input, err := term.ReadPassword(int(os.Stdin.Fd()))
-	if err != nil {
-		fatalError(fmt.Errorf("could not read password input: %w", err))
-	}
+	checkFatalError("failed to read password input", err)
 	fmt.Println("")
 	return string(input)
 }
@@ -29,9 +29,7 @@ func readInput(context string) string {
 	fmt.Printf("%s: ", context)
 	r := bufio.NewReader(os.Stdin)
 	input, err := r.ReadString('\n')
-	if err != nil {
-		fatalError(fmt.Errorf("could not read input: %w", err))
-	}
+	checkFatalError("failed to read input", err)
 	return strings.TrimSpace(input)
 }
 
@@ -115,9 +113,7 @@ func setDataDirectory() {
 	}
 
 	dir, err := filepath.Abs(cfg.Directory)
-	if err != nil {
-		fatalError(fmt.Errorf("failed to get absolute path of data directory: %w", err))
-	}
+	checkFatalError("failed to get absolute path of data directory", err)
 
 	fmt.Println("The data directory is where walletd will store its metadata and consensus data.")
 	fmt.Println("This directory should be on a fast, reliable storage device, preferably an SSD.")
@@ -200,7 +196,7 @@ func setAdvancedConfig() {
 	case strings.EqualFold(mode, "full"):
 		cfg.Index.Mode = wallet.IndexModeFull
 	default:
-		fatalError(fmt.Errorf("invalid index mode: %q", mode))
+		checkFatalError("invalid index mode", errors.New("must be either 'personal' or 'full'"))
 	}
 
 	fmt.Println("")
@@ -212,17 +208,45 @@ func setAdvancedConfig() {
 	cfg.Consensus.Network = readInput(`Enter network ("mainnet" or "zen")`)
 }
 
-func buildConfig() {
-	// write the config file
-	configPath := "walletd.yml"
-	if str := os.Getenv("WALLETD_CONFIG_FILE"); str != "" {
-		configPath = str
+func configPath() string {
+	if str := os.Getenv(configFileEnvVar); str != "" {
+		return str
 	}
 
-	if _, err := os.Stat(configPath); err == nil {
-		if !promptYesNo("walletd.yml already exists. Would you like to overwrite it?") {
+	switch runtime.GOOS {
+	case "windows":
+		return filepath.Join(os.Getenv("APPDATA"), "walletd", "walletd.yml")
+	case "darwin":
+		return filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "walletd", "walletd.yml")
+	case "linux", "freebsd", "openbsd":
+		return filepath.Join(string(filepath.Separator), "etc", "walletd", "walletd.yml")
+	default:
+		return "walletd.yml"
+	}
+}
+
+func buildConfig(fp string) {
+	fmt.Println("walletd Configuration Wizard")
+	fmt.Println("This wizard will help you configure walletd for the first time.")
+	fmt.Println("You can always change these settings with the config command or by editing the config file.")
+
+	// write the config file
+	if fp == "" {
+		fp = configPath()
+	}
+
+	fmt.Println("")
+	fmt.Printf("Config Location %q\n", fp)
+
+	if _, err := os.Stat(fp); err == nil {
+		if !promptYesNo(fmt.Sprintf("%q already exists. Would you like to overwrite it?", fp)) {
 			return
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		checkFatalError("failed to check if config file exists", err)
+	} else {
+		// ensure the config directory exists
+		checkFatalError("failed to create config directory", os.MkdirAll(filepath.Dir(fp), 0700))
 	}
 
 	fmt.Println("")
@@ -235,22 +259,13 @@ func buildConfig() {
 	setAdvancedConfig()
 
 	// write the config file
-	f, err := os.Create(configPath)
-	if err != nil {
-		fatalError(fmt.Errorf("failed to create config file: %w", err))
-		return
-	}
+	f, err := os.Create(fp)
+	checkFatalError("failed to create config file", err)
 	defer f.Close()
 
 	enc := yaml.NewEncoder(f)
-	if err := enc.Encode(cfg); err != nil {
-		fatalError(fmt.Errorf("failed to encode config file: %w", err))
-		return
-	} else if err := f.Sync(); err != nil {
-		fatalError(fmt.Errorf("failed to sync config file: %w", err))
-		return
-	} else if err := f.Close(); err != nil {
-		fatalError(fmt.Errorf("failed to close config file: %w", err))
-		return
-	}
+	defer enc.Close()
+
+	checkFatalError("failed to encode config file", enc.Encode(cfg))
+	checkFatalError("failed to sync config file", f.Sync())
 }

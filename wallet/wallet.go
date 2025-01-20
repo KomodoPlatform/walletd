@@ -220,7 +220,7 @@ func AppliedEvents(cs consensus.State, b types.Block, cu ChainUpdate, relevant f
 			}
 
 			sce, ok := sces[sfi.ParentID.ClaimOutputID()]
-			if ok && relevant(sce.SiacoinOutput.Address) {
+			if ok && relevant(sce.SiacoinOutput.Address) && !sce.SiacoinOutput.Value.IsZero() {
 				addEvent(types.Hash256(sce.ID), sce.MaturityHeight, EventTypeSiafundClaim, wallet.EventPayout{
 					SiacoinElement: sce,
 				}, []types.Address{sfi.ClaimAddress})
@@ -267,7 +267,7 @@ func AppliedEvents(cs consensus.State, b types.Block, cu ChainUpdate, relevant f
 			addresses[sfi.Parent.SiafundOutput.Address] = true
 
 			sce, ok := sces[types.SiafundOutputID(sfi.Parent.ID).V2ClaimOutputID()]
-			if ok && relevant(sfi.ClaimAddress) {
+			if ok && relevant(sfi.ClaimAddress) && !sce.SiacoinOutput.Value.IsZero() {
 				addEvent(types.Hash256(sce.ID), sce.MaturityHeight, EventTypeSiafundClaim, wallet.EventPayout{
 					SiacoinElement: sce,
 				}, []types.Address{sfi.ClaimAddress})
@@ -380,7 +380,7 @@ func AppliedEvents(cs consensus.State, b types.Block, cu ChainUpdate, relevant f
 	}
 
 	// handle foundation subsidy
-	if relevant(cs.FoundationPrimaryAddress) {
+	if relevant(cs.FoundationManagementAddress) {
 		element, ok := sces[cs.Index.ID.FoundationOutputID()]
 		if ok {
 			addEvent(types.Hash256(element.ID), element.MaturityHeight, EventTypeFoundationSubsidy, wallet.EventPayout{

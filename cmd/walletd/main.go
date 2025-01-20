@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,8 +18,14 @@ import (
 	"go.sia.tech/walletd/wallet"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"gopkg.in/yaml.v3"
 	"lukechampine.com/flagg"
+)
+
+const (
+	apiPasswordEnvVar = "WALLETD_API_PASSWORD"
+	configFileEnvVar  = "WALLETD_CONFIG_FILE"
+	dataDirEnvVar     = "WALLETD_DATA_DIR"
+	logFileEnvVar     = "WALLETD_LOG_FILE_PATH"
 )
 
 const (
@@ -52,11 +58,11 @@ Runs a CPU miner. Not intended for production use.
 
 var cfg = config.Config{
 	Name:          "walletd",
-	Directory:     ".",
+	Directory:     os.Getenv(dataDirEnvVar),
 	AutoOpenWebUI: true,
 	HTTP: config.HTTP{
 		Address:         "localhost:9980",
-		Password:        os.Getenv("WALLETD_API_PASSWORD"),
+		Password:        os.Getenv(apiPasswordEnvVar),
 		PublicEndpoints: false,
 	},
 	Syncer: config.Syncer{
@@ -75,7 +81,7 @@ var cfg = config.Config{
 		File: config.LogFile{
 			Enabled: true,
 			Format:  "json",
-			Path:    os.Getenv("WALLETD_LOG_FILE"),
+			Path:    os.Getenv(logFileEnvVar),
 		},
 		StdOut: config.StdOut{
 			Enabled:    true,
@@ -83,12 +89,6 @@ var cfg = config.Config{
 			EnableANSI: runtime.GOOS != "windows",
 		},
 	},
-}
-
-func check(context string, err error) {
-	if err != nil {
-		log.Fatalf("%v: %v", context, err)
-	}
 }
 
 func mustSetAPIPassword() {
@@ -111,38 +111,29 @@ func mustSetAPIPassword() {
 	}
 }
 
-func fatalError(err error) {
-	os.Stderr.WriteString(err.Error() + "\n")
+// checkFatalError prints an error message to stderr and exits with a 1 exit code. If err is nil, this is a no-op.
+func checkFatalError(context string, err error) {
+	if err == nil {
+		return
+	}
+	os.Stderr.WriteString(fmt.Sprintf("%s: %s\n", context, err))
 	os.Exit(1)
 }
 
-// tryLoadConfig loads the config file specified by the WALLETD_CONFIG_FILE. If
-// the config file does not exist, it will not be loaded.
-func tryLoadConfig() {
-	configPath := "walletd.yml"
-	if str := os.Getenv("WALLETD_CONFIG_FILE"); str != "" {
-		configPath = str
+// tryLoadConfig tries to load the config file. It will try multiple locations
+// based on GOOS starting with PWD/walletd.yml. If the file does not exist, it will
+// try the next location. If an error occurs while loading the file, it will
+// print the error and exit. If the config is successfully loaded, the path to
+// the config file is returned.
+func tryLoadConfig() string {
+	for _, fp := range tryConfigPaths() {
+		if err := config.LoadFile(fp, &cfg); err == nil {
+			return fp
+		} else if !errors.Is(err, os.ErrNotExist) {
+			checkFatalError("failed to load config file", err)
+		}
 	}
-
-	// If the config file doesn't exist, don't try to load it.
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return
-	}
-
-	f, err := os.Open(configPath)
-	if err != nil {
-		fatalError(fmt.Errorf("failed to open config file: %w", err))
-		return
-	}
-	defer f.Close()
-
-	dec := yaml.NewDecoder(f)
-	dec.KnownFields(true)
-
-	if err := dec.Decode(&cfg); err != nil {
-		fmt.Println("failed to decode config file:", err)
-		os.Exit(1)
-	}
+	return ""
 }
 
 // jsonEncoder returns a zapcore.Encoder that encodes logs as JSON intended for
@@ -189,10 +180,24 @@ func parseLogLevel(level string) zap.AtomicLevel {
 	panic("unreachable")
 }
 
+func initStdoutLog(colored bool, levelStr string) *zap.Logger {
+	level := parseLogLevel(levelStr)
+	core := zapcore.NewCore(humanEncoder(colored), zapcore.Lock(os.Stdout), level)
+	return zap.New(core, zap.AddCaller())
+}
+
 func main() {
-	// attempt to load the config file first, command line flags will override
-	// any values set in the config file
-	tryLoadConfig()
+	log := initStdoutLog(cfg.Log.StdOut.EnableANSI, cfg.Log.Level)
+	defer log.Sync()
+
+	// attempt to load the config file, command line flags will override any
+	// values set in the config file
+	configPath := tryLoadConfig()
+	if configPath != "" {
+		log.Info("loaded config file", zap.String("path", configPath))
+	}
+	// set the data directory to the default if it is not set
+	cfg.Directory = defaultDataDirectory(cfg.Directory)
 
 	indexModeStr := cfg.Index.Mode.String()
 
@@ -243,11 +248,13 @@ func main() {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGKILL)
 		defer cancel()
 
-		if err := os.MkdirAll(cfg.Directory, 0700); err != nil {
-			fatalError(fmt.Errorf("failed to create data directory: %w", err))
+		if cfg.Directory != "" {
+			checkFatalError("failed to create data directory", os.MkdirAll(cfg.Directory, 0700))
 		}
 
 		mustSetAPIPassword()
+
+		checkFatalError("failed to parse index mode", cfg.Index.Mode.UnmarshalText([]byte(indexModeStr)))
 
 		var logCores []zapcore.Core
 		if cfg.Log.StdOut.Enabled {
@@ -290,10 +297,7 @@ func main() {
 			}
 
 			fileWriter, closeFn, err := zap.Open(cfg.Log.File.Path)
-			if err != nil {
-				fatalError(fmt.Errorf("failed to open log file: %w", err))
-				return
-			}
+			checkFatalError("failed to open log file", err)
 			defer closeFn()
 
 			// create the file logger
@@ -312,13 +316,7 @@ func main() {
 		// redirect stdlib log to zap
 		zap.RedirectStdLog(log.Named("stdlib"))
 
-		if err := cfg.Index.Mode.UnmarshalText([]byte(indexModeStr)); err != nil {
-			log.Fatal("failed to parse index mode", zap.Error(err))
-		}
-
-		if err := runNode(ctx, cfg, log, enableDebug); err != nil {
-			log.Fatal("failed to run node", zap.Error(err))
-		}
+		checkFatalError("failed to run node", runNode(ctx, cfg, log, enableDebug))
 	case versionCmd:
 		if len(cmd.Args()) != 0 {
 			cmd.Usage()
@@ -334,9 +332,7 @@ func main() {
 		}
 		recoveryPhrase := cwallet.NewSeedPhrase()
 		var seed [32]byte
-		if err := cwallet.SeedFromPhrase(&seed, recoveryPhrase); err != nil {
-			log.Fatal(err)
-		}
+		checkFatalError("failed to parse mnemonic phrase", cwallet.SeedFromPhrase(&seed, recoveryPhrase))
 		addr := types.StandardUnlockHash(cwallet.KeyFromSeed(&seed, 0).PublicKey())
 
 		fmt.Println("Recovery Phrase:", recoveryPhrase)
@@ -347,7 +343,7 @@ func main() {
 			return
 		}
 
-		buildConfig()
+		buildConfig(configPath)
 	case mineCmd:
 		if len(cmd.Args()) != 0 {
 			cmd.Usage()
@@ -355,10 +351,7 @@ func main() {
 		}
 
 		minerAddr, err := types.ParseAddress(minerAddrStr)
-		if err != nil {
-			log.Fatal(err)
-		}
-
+		checkFatalError("failed to parse miner address", err)
 		mustSetAPIPassword()
 		c := api.NewClient("http://"+cfg.HTTP.Address+"/api", cfg.HTTP.Password)
 		runCPUMiner(c, minerAddr, minerBlocks)

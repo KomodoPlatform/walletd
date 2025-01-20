@@ -11,13 +11,13 @@ RUN go mod download
 COPY . .
 
 # Enable CGO for sqlite3 support
-ENV CGO_ENABLED=1 
+ENV CGO_ENABLED=1
 
 RUN go generate ./...
 RUN go mod tidy
 RUN go build -o bin/ -tags='netgo timetzdata' -trimpath -a -ldflags '-s -w -linkmode external -extldflags "-static"'  ./cmd/walletd
 
-FROM docker.io/library/alpine:3
+FROM debian:bookworm-slim
 
 ENV PUID=0
 ENV PGID=0
