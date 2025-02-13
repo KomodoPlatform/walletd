@@ -46,6 +46,19 @@ type TxpoolTransactionsResponse struct {
 	V2Transactions []types.V2Transaction `json:"v2transactions"`
 }
 
+// TxpoolUpdateV2TransactionsRequest is the request type for /txpool/transactions/v2/basis.
+type TxpoolUpdateV2TransactionsRequest struct {
+	Basis        types.ChainIndex      `json:"basis"`
+	Target       types.ChainIndex      `json:"target"`
+	Transactions []types.V2Transaction `json:"transactions"`
+}
+
+// TxpoolUpdateV2TransactionsResponse is the response type for /txpool/transactions/v2/basis.
+type TxpoolUpdateV2TransactionsResponse struct {
+	Basis        types.ChainIndex      `json:"basis"`
+	Transactions []types.V2Transaction `json:"transactions"`
+}
+
 // BalanceResponse is the response type for /wallets/:id/balance.
 type BalanceResponse wallet.Balance
 
@@ -85,6 +98,7 @@ type WalletFundSFRequest struct {
 
 // WalletFundResponse is the response type for /wallets/:id/fund.
 type WalletFundResponse struct {
+	Basis       types.ChainIndex    `json:"basis"`
 	Transaction types.Transaction   `json:"transaction"`
 	ToSign      []types.Hash256     `json:"toSign"`
 	DependsOn   []types.Transaction `json:"dependsOn"`
@@ -158,4 +172,18 @@ type ConsensusUpdatesResponse struct {
 type DebugMineRequest struct {
 	Blocks  int           `json:"blocks"`
 	Address types.Address `json:"address"`
+}
+
+// SiacoinElementsResponse is the response type for any endpoint that returns
+// siacoin UTXOs
+type SiacoinElementsResponse struct {
+	Basis   types.ChainIndex       `json:"basis"`
+	Outputs []types.SiacoinElement `json:"outputs"`
+}
+
+// SiafundElementsResponse is the response type for any endpoint that returns
+// siafund UTXOs
+type SiafundElementsResponse struct {
+	Basis   types.ChainIndex       `json:"basis"`
+	Outputs []types.SiafundElement `json:"outputs"`
 }
