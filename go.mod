@@ -1,4 +1,4 @@
-module go.sia.tech/walletd
+module go.sia.tech/walletd // v2.0.0
 
 go 1.23.1
 
@@ -9,7 +9,7 @@ require (
 	go.sia.tech/core v0.10.1
 	go.sia.tech/coreutils v0.11.1
 	go.sia.tech/jape v0.12.1
-	go.sia.tech/web/walletd v0.27.0
+	go.sia.tech/web/walletd v0.29.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/term v0.29.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -28,7 +28,7 @@ require (
 	github.com/quic-go/webtransport-go v0.8.1-0.20241018022711-4ac2c9250e66 // indirect
 	go.etcd.io/bbolt v1.4.0 // indirect
 	go.sia.tech/mux v1.3.0 // indirect
-	go.sia.tech/web v0.0.0-20240422221546-c1709d16b6ef // indirect
+	go.sia.tech/web v0.0.0-20240610131903-5611d44a533e // indirect
 	go.uber.org/mock v0.5.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.33.0 // indirect
