@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"go.sia.tech/walletd/wallet"
+	"go.sia.tech/walletd/v2/wallet"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,6 +23,12 @@ type (
 		Bootstrap  bool     `yaml:"bootstrap,omitempty"`
 		EnableUPnP bool     `yaml:"enableUPnP,omitempty"`
 		Peers      []string `yaml:"peers,omitempty"`
+	}
+
+	// KeyStore contains the configuration for the key store.
+	KeyStore struct {
+		Enabled bool   `yaml:"enabled,omitempty"`
+		Secret  string `yaml:"secret,omitempty"`
 	}
 
 	// Consensus contains the configuration for the consensus set.
@@ -71,6 +77,7 @@ type (
 		Syncer    Syncer    `yaml:"syncer,omitempty"`
 		Log       Log       `yaml:"log,omitempty"`
 		Index     Index     `yaml:"index,omitempty"`
+		KeyStore  KeyStore  `yaml:"keystore,omitempty"`
 	}
 )
 

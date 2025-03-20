@@ -19,11 +19,12 @@ import (
 	"go.sia.tech/coreutils"
 	"go.sia.tech/coreutils/chain"
 	"go.sia.tech/coreutils/syncer"
-	"go.sia.tech/walletd/api"
-	"go.sia.tech/walletd/build"
-	"go.sia.tech/walletd/config"
-	"go.sia.tech/walletd/persist/sqlite"
-	"go.sia.tech/walletd/wallet"
+	"go.sia.tech/walletd/v2/api"
+	"go.sia.tech/walletd/v2/build"
+	"go.sia.tech/walletd/v2/config"
+	"go.sia.tech/walletd/v2/keys"
+	"go.sia.tech/walletd/v2/persist/sqlite"
+	"go.sia.tech/walletd/v2/wallet"
 	"go.sia.tech/web/walletd"
 	"go.uber.org/zap"
 	"lukechampine.com/upnp"
@@ -114,6 +115,9 @@ func runNode(ctx context.Context, cfg config.Config, log *zap.Logger, enableDebu
 	case "anagami":
 		network, genesisBlock = chain.TestnetAnagami()
 		bootstrapPeers = syncer.AnagamiBootstrapPeers
+	case "erravimus":
+		network, genesisBlock = chain.TestnetErravimus()
+		bootstrapPeers = syncer.ErravimusBootstrapPeers
 	default:
 		return errors.New("invalid network: must be one of 'mainnet', 'zen', 'anagami', or 'komodo")
 	}
@@ -211,6 +215,15 @@ func runNode(ctx context.Context, cfg config.Config, log *zap.Logger, enableDebu
 	}
 	if enableDebug {
 		apiOpts = append(apiOpts, api.WithDebug())
+	}
+	if cfg.KeyStore.Enabled {
+		km, err := keys.NewManager(store, cfg.KeyStore.Secret)
+		if err != nil {
+			return fmt.Errorf("failed to create key manager: %w", err)
+		}
+		defer km.Close()
+
+		apiOpts = append(apiOpts, api.WithKeyManager(km))
 	}
 	api := api.NewServer(cm, s, wm, apiOpts...)
 	web := walletd.Handler()

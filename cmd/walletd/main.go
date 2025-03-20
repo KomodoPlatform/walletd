@@ -11,21 +11,21 @@ import (
 	"syscall"
 
 	"go.sia.tech/core/types"
-	cwallet "go.sia.tech/coreutils/wallet"
-	"go.sia.tech/walletd/api"
-	"go.sia.tech/walletd/build"
-	"go.sia.tech/walletd/config"
-	"go.sia.tech/walletd/wallet"
+	"go.sia.tech/walletd/v2/api"
+	"go.sia.tech/walletd/v2/build"
+	"go.sia.tech/walletd/v2/config"
+	"go.sia.tech/walletd/v2/wallet"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"lukechampine.com/flagg"
 )
 
 const (
-	apiPasswordEnvVar = "WALLETD_API_PASSWORD"
-	configFileEnvVar  = "WALLETD_CONFIG_FILE"
-	dataDirEnvVar     = "WALLETD_DATA_DIR"
-	logFileEnvVar     = "WALLETD_LOG_FILE_PATH"
+	apiPasswordEnvVar    = "WALLETD_API_PASSWORD"
+	configFileEnvVar     = "WALLETD_CONFIG_FILE"
+	dataDirEnvVar        = "WALLETD_DATA_DIR"
+	logFileEnvVar        = "WALLETD_LOG_FILE_PATH"
+	keystoreSecretEnvVar = "WALLETD_KEYSTORE_SECRET"
 )
 
 const (
@@ -75,6 +75,10 @@ var cfg = config.Config{
 	Index: config.Index{
 		Mode:      wallet.IndexModePersonal,
 		BatchSize: 1000,
+	},
+	KeyStore: config.KeyStore{
+		Enabled: false,
+		Secret:  os.Getenv(keystoreSecretEnvVar),
 	},
 	Log: config.Log{
 		Level: "info",
@@ -211,6 +215,7 @@ func main() {
 	rootCmd.StringVar(&cfg.Directory, "dir", cfg.Directory, "directory to store node state in")
 	rootCmd.StringVar(&cfg.HTTP.Address, "http", cfg.HTTP.Address, "address to serve API on")
 	rootCmd.BoolVar(&cfg.HTTP.PublicEndpoints, "http.public", cfg.HTTP.PublicEndpoints, "disables auth on endpoints that should be publicly accessible when running walletd as a service")
+	rootCmd.BoolVar(&cfg.KeyStore.Enabled, "keystore", cfg.KeyStore.Enabled, "enables the keystore")
 
 	rootCmd.StringVar(&cfg.Syncer.Address, "addr", cfg.Syncer.Address, "p2p address to listen on")
 	rootCmd.StringVar(&cfg.Consensus.Network, "network", cfg.Consensus.Network, "network to connect to")
@@ -255,6 +260,10 @@ func main() {
 		mustSetAPIPassword()
 
 		checkFatalError("failed to parse index mode", cfg.Index.Mode.UnmarshalText([]byte(indexModeStr)))
+
+		if cfg.KeyStore.Enabled && cfg.KeyStore.Secret == "" {
+			checkFatalError("keystore is enabled but no secret was provided", errors.New("missing keystore secret"))
+		}
 
 		var logCores []zapcore.Core
 		if cfg.Log.StdOut.Enabled {
@@ -330,10 +339,10 @@ func main() {
 			cmd.Usage()
 			return
 		}
-		recoveryPhrase := cwallet.NewSeedPhrase()
+		recoveryPhrase := wallet.NewSeedPhrase()
 		var seed [32]byte
-		checkFatalError("failed to parse mnemonic phrase", cwallet.SeedFromPhrase(&seed, recoveryPhrase))
-		addr := types.StandardUnlockHash(cwallet.KeyFromSeed(&seed, 0).PublicKey())
+		checkFatalError("failed to parse mnemonic phrase", wallet.SeedFromPhrase(&seed, recoveryPhrase))
+		addr := types.StandardUnlockHash(wallet.KeyFromSeed(&seed, 0).PublicKey())
 
 		fmt.Println("Recovery Phrase:", recoveryPhrase)
 		fmt.Println("Address", addr)

@@ -18,8 +18,9 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/coreutils/chain"
 	"go.sia.tech/coreutils/syncer"
-	"go.sia.tech/walletd/build"
-	"go.sia.tech/walletd/wallet"
+	"go.sia.tech/walletd/v2/build"
+	"go.sia.tech/walletd/v2/keys"
+	"go.sia.tech/walletd/v2/wallet"
 )
 
 // A ServerOption sets an optional parameter for the server.
@@ -36,6 +37,13 @@ func WithLogger(log *zap.Logger) ServerOption {
 func WithDebug() ServerOption {
 	return func(s *server) {
 		s.debugEnabled = true
+	}
+}
+
+// WithKeyManager sets the key manager used by the server.
+func WithKeyManager(ks SigningKeyManager) ServerOption {
+	return func(s *server) {
+		s.km = ks
 	}
 }
 
@@ -61,6 +69,7 @@ type (
 
 		Tip() types.ChainIndex
 		BestIndex(height uint64) (types.ChainIndex, bool)
+		Block(id types.BlockID) (types.Block, bool)
 		TipState() consensus.State
 		AddBlocks([]types.Block) error
 		RecommendedFee() types.Currency
@@ -110,8 +119,8 @@ type (
 		AddressBalance(address types.Address) (wallet.Balance, error)
 		AddressEvents(address types.Address, offset, limit int) ([]wallet.Event, error)
 		AddressUnconfirmedEvents(address types.Address) ([]wallet.Event, error)
-		AddressSiacoinOutputs(address types.Address, offset, limit int) ([]types.SiacoinElement, types.ChainIndex, error)
-		AddressSiafundOutputs(address types.Address, offset, limit int) ([]types.SiafundElement, types.ChainIndex, error)
+		AddressSiacoinOutputs(address types.Address, tpool bool, offset, limit int) ([]wallet.UnspentSiacoinElement, types.ChainIndex, error)
+		AddressSiafundOutputs(address types.Address, tpool bool, offset, limit int) ([]wallet.UnspentSiafundElement, types.ChainIndex, error)
 
 		Events(eventIDs []types.Hash256) ([]wallet.Event, error)
 
@@ -131,6 +140,13 @@ type (
 		Reserve([]types.Hash256) error
 		Release([]types.Hash256)
 	}
+
+	// A SigningKeyManager manages ed25519 signing keys.
+	SigningKeyManager interface {
+		Add(types.PrivateKey) error
+		Delete(types.PublicKey) error
+		Sign(types.PublicKey, types.Hash256) (types.Signature, error)
+	}
 )
 
 type server struct {
@@ -143,6 +159,7 @@ type server struct {
 	cm  ChainManager
 	s   Syncer
 	wm  WalletManager
+	km  SigningKeyManager
 
 	scanMu         sync.Mutex // for resubscribe
 	scanInProgress bool
@@ -170,6 +187,19 @@ func (s *server) consensusTipHandler(jc jape.Context) {
 
 func (s *server) consensusTipStateHandler(jc jape.Context) {
 	jc.Encode(s.cm.TipState())
+}
+
+func (s *server) consensusBlocksIDHandler(jc jape.Context) {
+	var bid types.BlockID
+	if jc.DecodeParam("id", &bid) != nil {
+		return
+	}
+	block, found := s.cm.Block(bid)
+	if !found {
+		jc.Error(errors.New("couldn't find block"), http.StatusNotFound)
+		return
+	}
+	jc.Encode(block)
 }
 
 func (s *server) consensusIndexHeightHandler(jc jape.Context) {
@@ -1174,16 +1204,21 @@ func (s *server) addressesAddrOutputsSCHandler(jc jape.Context) {
 		return
 	}
 
+	var useTPool bool
+	if jc.DecodeForm("tpool", &useTPool) != nil {
+		return
+	}
+
 	offset, limit := 0, 1000
 	if jc.DecodeForm("offset", &offset) != nil || jc.DecodeForm("limit", &limit) != nil {
 		return
 	}
 
-	utxos, basis, err := s.wm.AddressSiacoinOutputs(addr, offset, limit)
+	utxos, basis, err := s.wm.AddressSiacoinOutputs(addr, useTPool, offset, limit)
 	if jc.Check("couldn't load utxos", err) != nil {
 		return
 	}
-	jc.Encode(SiacoinElementsResponse{
+	jc.Encode(AddressSiacoinElementsResponse{
 		Basis:   basis,
 		Outputs: utxos,
 	})
@@ -1195,16 +1230,21 @@ func (s *server) addressesAddrOutputsSFHandler(jc jape.Context) {
 		return
 	}
 
+	var useTPool bool
+	if jc.DecodeForm("tpool", &useTPool) != nil {
+		return
+	}
+
 	offset, limit := 0, 1000
 	if jc.DecodeForm("offset", &offset) != nil || jc.DecodeForm("limit", &limit) != nil {
 		return
 	}
 
-	utxos, basis, err := s.wm.AddressSiafundOutputs(addr, offset, limit)
+	utxos, basis, err := s.wm.AddressSiafundOutputs(addr, useTPool, offset, limit)
 	if jc.Check("couldn't load utxos", err) != nil {
 		return
 	}
-	jc.Encode(SiafundElementsResponse{
+	jc.Encode(AddressSiafundElementsResponse{
 		Basis:   basis,
 		Outputs: utxos,
 	})
@@ -1249,6 +1289,63 @@ func (s *server) outputsSiafundHandlerGET(jc jape.Context) {
 		return
 	}
 	jc.Encode(output)
+}
+
+func (s *server) keysEd25519GenerateHandlerPOST(jc jape.Context) {
+	sk := types.GeneratePrivateKey()
+	defer clear(sk)
+	if jc.Check("failed to add key", s.km.Add(sk)) != nil {
+		return
+	}
+	jc.Encode(AddSigningKeyResponse{
+		PublicKey: sk.PublicKey(),
+	})
+}
+
+func (s *server) keysEd25519HandlerPUT(jc jape.Context) {
+	var req AddSigningKeyRequest
+	defer clear(req.PrivateKey)
+	if jc.Decode(&req) != nil {
+		return
+	} else if jc.Check("failed to add key", s.km.Add(req.PrivateKey)) != nil {
+		return
+	}
+
+	jc.Encode(AddSigningKeyResponse{
+		PublicKey: req.PrivateKey.PublicKey(),
+	})
+}
+
+func (s *server) keysEd25519HandlerDELETE(jc jape.Context) {
+	var pk types.PublicKey
+	if jc.DecodeParam("pub", &pk) != nil {
+		return
+	} else if jc.Check("failed to remove key", s.km.Delete(pk)) != nil {
+		return
+	}
+	jc.EmptyResonse()
+}
+
+func (s *server) keysEd25519SignHandlerPOST(jc jape.Context) {
+	var pub types.PublicKey
+	if jc.DecodeParam("pub", &pub) != nil {
+		return
+	}
+	var req SignHashRequest
+	if jc.Decode(&req) != nil {
+		return
+	}
+
+	sig, err := s.km.Sign(pub, req.Hash)
+	if errors.Is(err, keys.ErrNotFound) {
+		jc.Error(err, http.StatusNotFound)
+		return
+	} else if jc.Check("failed to sign message", err) != nil {
+		return
+	}
+	jc.Encode(SignHashResponse{
+		Signature: sig,
+	})
 }
 
 func (s *server) debugMineHandler(jc jape.Context) {
@@ -1363,6 +1460,7 @@ func NewServer(cm ChainManager, s Syncer, wm WalletManager, opts ...ServerOption
 		"GET /consensus/network":        wrapPublicAuthHandler(srv.consensusNetworkHandler),
 		"GET /consensus/tip":            wrapPublicAuthHandler(srv.consensusTipHandler),
 		"GET /consensus/tipstate":       wrapPublicAuthHandler(srv.consensusTipStateHandler),
+		"GET /consensus/blocks/:id":     wrapPublicAuthHandler(srv.consensusBlocksIDHandler),
 		"GET /consensus/updates/:index": wrapPublicAuthHandler(srv.consensusUpdatesIndexHandler),
 		"GET /consensus/index/:height":  wrapPublicAuthHandler(srv.consensusIndexHeightHandler),
 
@@ -1410,6 +1508,14 @@ func NewServer(cm ChainManager, s Syncer, wm WalletManager, opts ...ServerOption
 		"POST /wallets/:id/release":                  wrapAuthHandler(srv.walletsReleaseHandler),
 		"POST /wallets/:id/fund":                     wrapAuthHandler(srv.walletsFundHandler),
 		"POST /wallets/:id/fundsf":                   wrapAuthHandler(srv.walletsFundSFHandler),
+	}
+
+	if srv.km != nil && !srv.publicEndpoints {
+		// key management endpoints are disabled on public nodes
+		handlers["POST /keys/generate/ed25519"] = wrapAuthHandler(srv.keysEd25519GenerateHandlerPOST)
+		handlers["PUT /keys/ed25519"] = wrapAuthHandler(srv.keysEd25519HandlerPUT)
+		handlers["DELETE /keys/ed25519/:pub"] = wrapAuthHandler(srv.keysEd25519HandlerDELETE)
+		handlers["POST /keys/ed25519/:pub/sign"] = wrapAuthHandler(srv.keysEd25519SignHandlerPOST)
 	}
 
 	if srv.debugEnabled {

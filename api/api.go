@@ -1,3 +1,6 @@
+// Package api provides a RESTful API client and server for the walletd
+// daemon.
+
 package api
 
 import (
@@ -6,7 +9,7 @@ import (
 
 	"go.sia.tech/core/consensus"
 	"go.sia.tech/core/types"
-	"go.sia.tech/walletd/wallet"
+	"go.sia.tech/walletd/v2/wallet"
 )
 
 // A StateResponse returns information about the current state of the walletd
@@ -188,9 +191,44 @@ type SiafundElementsResponse struct {
 	Outputs []types.SiafundElement `json:"outputs"`
 }
 
+// AddressSiacoinElementsResponse is the response type for any endpoint that returns
+// siacoin UTXOs
+type AddressSiacoinElementsResponse struct {
+	Basis   types.ChainIndex               `json:"basis"`
+	Outputs []wallet.UnspentSiacoinElement `json:"outputs"`
+}
+
+// AddressSiafundElementsResponse is the response type for any endpoint that returns
+// siafund UTXOs
+type AddressSiafundElementsResponse struct {
+	Basis   types.ChainIndex               `json:"basis"`
+	Outputs []wallet.UnspentSiafundElement `json:"outputs"`
+}
+
 // ElementSpentResponse is the response type for /outputs/siacoin/:id/spent and
 // /outputs/siafund/:id/spent.
 type ElementSpentResponse struct {
 	Spent bool          `json:"spent"`
 	Event *wallet.Event `json:"event,omitempty"`
+}
+
+// An AddSigningKeyRequest is a request to add an ed25519 signing key to the
+// key store.
+type AddSigningKeyRequest struct {
+	PrivateKey types.PrivateKey `json:"privateKey"`
+}
+
+// An AddSigningKeyResponse is the response to an AddSigningKeyRequest.
+type AddSigningKeyResponse struct {
+	PublicKey types.PublicKey `json:"publicKey"`
+}
+
+// A SignHashRequest is a request to sign a hash with a key.
+type SignHashRequest struct {
+	Hash types.Hash256 `json:"hash"`
+}
+
+// A SignHashResponse is the response to a SignHashRequest.
+type SignHashResponse struct {
+	Signature types.Signature `json:"signature"`
 }
